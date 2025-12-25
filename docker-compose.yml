@@ -1,6 +1,3 @@
-# docker-compose.yml
-version: "3.8"
-
 volumes:
   db_storage:
   n8n_storage:
@@ -8,35 +5,45 @@ volumes:
   caddy_data:
 
 x-shared: &shared
+  image: docker.n8n.io/n8nio/n8n:latest
+  pull_policy: always
   restart: always
-  image: docker.n8n.io/n8nio/n8n
   environment:
+    # Database
     - DB_TYPE=postgresdb
     - DB_POSTGRESDB_HOST=postgres
     - DB_POSTGRESDB_PORT=5432
     - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
     - DB_POSTGRESDB_USER=${POSTGRES_USER}
     - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+
+    # Queue mode
     - EXECUTIONS_MODE=queue
     - QUEUE_BULL_REDIS_HOST=redis
+    - QUEUE_BULL_REDIS_DB=0
     - QUEUE_HEALTH_CHECK_ACTIVE=true
+    - N8N_CONCURRENCY=1
+
+    # Core n8n
+    - NODE_ENV=production
     - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
     - N8N_HOST=${SUB_DOMAIN}.${DOMAIN}
     - WEBHOOK_URL=https://${SUB_DOMAIN}.${DOMAIN}
-  links:
-    - postgres
-    - redis
+
+    # Performance & stability
+    - N8N_DIAGNOSTICS_ENABLED=false
+    - N8N_PERSONALIZATION_ENABLED=false
+    - N8N_LOG_LEVEL=warn
+    - EXECUTIONS_DATA_PRUNE=true
+    - EXECUTIONS_DATA_MAX_AGE=336
+
   volumes:
     - n8n_storage:/home/node/.n8n
-  depends_on:
-    redis:
-      condition: service_healthy
-    postgres:
-      condition: service_healthy
 
 services:
   postgres:
-    image: postgres:16
+    image: postgres:latest
+    pull_policy: always
     restart: always
     environment:
       - POSTGRES_USER
@@ -49,14 +56,15 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}",
+          "pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
         ]
       interval: 5s
       timeout: 5s
       retries: 10
 
   redis:
-    image: redis:6-alpine
+    image: redis:latest
+    pull_policy: always
     restart: always
     volumes:
       - redis_storage:/data
@@ -68,19 +76,24 @@ services:
 
   n8n:
     <<: *shared
-    # no ports: section – Caddy will proxy
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   n8n-worker:
     <<: *shared
     command: worker
     depends_on:
-      - n8n
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:latest
+    pull_policy: always
     restart: always
     ports:
       - "80:80"
