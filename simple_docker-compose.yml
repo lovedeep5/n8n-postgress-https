@@ -1,0 +1,49 @@
+volumes:
+  n8n_data:
+  caddy_data:
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    pull_policy: always
+    restart: always
+    environment:
+      # Database (SQLite, persisted via volume)
+      - DB_TYPE=sqlite
+
+      # Core
+      - NODE_ENV=production
+      - N8N_ENCRYPTION_KEY=${ENCRYPTION_KEY}
+
+      - N8N_HOST=${SUB_DOMAIN}.${DOMAIN}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://${SUB_DOMAIN}.${DOMAIN}/
+      - N8N_EDITOR_BASE_URL=https://${SUB_DOMAIN}.${DOMAIN}/
+
+      - TZ=Asia/Kolkata
+
+      # Execution data retention (2 weeks)
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=336
+
+      # Noise reduction
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=false
+      - N8N_LOG_LEVEL=info
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+  caddy:
+    image: caddy:latest
+    pull_policy: always
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - n8n
