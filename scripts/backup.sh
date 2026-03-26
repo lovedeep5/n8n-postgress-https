@@ -2,20 +2,27 @@
 set -e
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 COMPOSE="docker compose -f /opt/n8n/simple_docker-compose.yml"
-VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
-BACKUP_DIR="/opt/n8n/backups/backup_${TIMESTAMP}_v${VERSION}"
 CONTAINER=$($COMPOSE ps -q n8n 2>/dev/null)
-DATA_PATH=$(docker inspect "$CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/home/node/.n8n"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
+IMAGE=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null || echo "docker.n8n.io/n8nio/n8n:latest")
+BACKUP_DIR="/opt/n8n/backups/backup_${TIMESTAMP}_v${VERSION}"
 mkdir -p "$BACKUP_DIR"
-# Flush WAL into main DB while n8n is still running (uses sqlite3 inside the container)
-docker exec "$CONTAINER" sqlite3 /home/node/.n8n/database.sqlite "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
-$COMPOSE stop n8n
-if [ -n "$DATA_PATH" ] && [ -f "$DATA_PATH/database.sqlite" ]; then
-  cp "$DATA_PATH/database.sqlite" "$BACKUP_DIR/database.sqlite"
-else
-  docker cp "$CONTAINER:/home/node/.n8n/database.sqlite" "$BACKUP_DIR/database.sqlite"
-fi
+
+# Export workflows using n8n CLI (inside running container)
+$COMPOSE exec -T n8n n8n export:workflow --all --pretty --output=/home/node/.n8n/_backup_workflows.json 2>/dev/null
+docker cp "$CONTAINER:/home/node/.n8n/_backup_workflows.json" "$BACKUP_DIR/workflows.json" 2>/dev/null
+
+# Export credentials
+$COMPOSE exec -T n8n n8n export:credentials --all --pretty --output=/home/node/.n8n/_backup_credentials.json 2>/dev/null || true
+docker cp "$CONTAINER:/home/node/.n8n/_backup_credentials.json" "$BACKUP_DIR/credentials.json" 2>/dev/null || true
+
+# Save version and image for rollback
 echo "$VERSION" > "$BACKUP_DIR/version.txt"
-$COMPOSE start n8n
+echo "$IMAGE" > "$BACKUP_DIR/image.txt"
+
+# Cleanup temp files inside container
+$COMPOSE exec -T n8n rm -f /home/node/.n8n/_backup_workflows.json /home/node/.n8n/_backup_credentials.json 2>/dev/null || true
+
+# Keep only last 2 backups
 cd /opt/n8n/backups && ls -dt backup_*/ 2>/dev/null | tail -n +3 | xargs rm -rf 2>/dev/null || true
 echo "BACKUP_OK|$BACKUP_DIR|$VERSION"

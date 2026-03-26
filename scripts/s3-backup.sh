@@ -1,5 +1,5 @@
 #!/bin/bash
-# Cloud backup: stop n8n, copy SQLite, restart n8n, upload via pre-signed URL
+# Cloud backup: export workflows + credentials, upload via pre-signed URL
 # Usage: s3-backup.sh <presigned-put-url>
 set -e
 
@@ -11,26 +11,14 @@ fi
 
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
 COMPOSE="docker compose -f /opt/n8n/simple_docker-compose.yml"
-VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
 CONTAINER=$($COMPOSE ps -q n8n 2>/dev/null)
-DATA_PATH=$(docker inspect "$CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/home/node/.n8n"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
-BACKUP_FILE="/tmp/n8n_cloud_backup_${TIMESTAMP}.sqlite"
+VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
+BACKUP_FILE="/tmp/n8n_cloud_backup_${TIMESTAMP}.json"
 
-# Flush WAL into main DB while n8n is still running (uses sqlite3 inside the container)
-docker exec "$CONTAINER" sqlite3 /home/node/.n8n/database.sqlite "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
-
-# Stop n8n to get a consistent snapshot
-$COMPOSE stop n8n
-
-# Copy the database
-if [ -n "$DATA_PATH" ] && [ -f "$DATA_PATH/database.sqlite" ]; then
-  cp "$DATA_PATH/database.sqlite" "$BACKUP_FILE"
-else
-  docker cp "$CONTAINER:/home/node/.n8n/database.sqlite" "$BACKUP_FILE"
-fi
-
-# Restart n8n immediately (minimize downtime)
-$COMPOSE start n8n
+# Export workflows using n8n CLI (no downtime)
+$COMPOSE exec -T n8n n8n export:workflow --all --pretty --output=/home/node/.n8n/_cloud_backup.json 2>/dev/null
+docker cp "$CONTAINER:/home/node/.n8n/_cloud_backup.json" "$BACKUP_FILE" 2>/dev/null
+$COMPOSE exec -T n8n rm -f /home/node/.n8n/_cloud_backup.json 2>/dev/null || true
 
 # Upload to cloud storage via pre-signed URL
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT -T "$BACKUP_FILE" "$PRESIGNED_URL")
