@@ -16,12 +16,14 @@ CONTAINER=$($COMPOSE ps -q n8n 2>/dev/null)
 DATA_PATH=$(docker inspect "$CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/home/node/.n8n"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
 BACKUP_FILE="/tmp/n8n_cloud_backup_${TIMESTAMP}.sqlite"
 
+# Flush WAL into main DB while n8n is still running (uses sqlite3 inside the container)
+docker exec "$CONTAINER" sqlite3 /home/node/.n8n/database.sqlite "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+
 # Stop n8n to get a consistent snapshot
 $COMPOSE stop n8n
 
 # Copy the database
 if [ -n "$DATA_PATH" ] && [ -f "$DATA_PATH/database.sqlite" ]; then
-  sqlite3 "$DATA_PATH/database.sqlite" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
   cp "$DATA_PATH/database.sqlite" "$BACKUP_FILE"
 else
   docker cp "$CONTAINER:/home/node/.n8n/database.sqlite" "$BACKUP_FILE"
