@@ -15,10 +15,16 @@ CONTAINER=$($COMPOSE ps -q n8n 2>/dev/null)
 VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
 BACKUP_FILE="/tmp/n8n_cloud_backup_${TIMESTAMP}.json"
 
-# Export workflows using n8n CLI (no downtime)
-$COMPOSE exec -T n8n n8n export:workflow --all --pretty --output=/home/node/.n8n/_cloud_backup.json 2>/dev/null
-docker cp "$CONTAINER:/home/node/.n8n/_cloud_backup.json" "$BACKUP_FILE" 2>/dev/null
-$COMPOSE exec -T n8n rm -f /home/node/.n8n/_cloud_backup.json 2>/dev/null || true
+# Export workflows — capture output to detect empty instances
+EXPORT_OUT=$($COMPOSE exec -T n8n n8n export:workflow --all --pretty \
+  --output=/home/node/.n8n/_cloud_backup.json 2>&1 || true)
+
+if echo "$EXPORT_OUT" | grep -q "No workflows found"; then
+  echo '{"workflows":[]}' > "$BACKUP_FILE"
+else
+  docker cp "$CONTAINER:/home/node/.n8n/_cloud_backup.json" "$BACKUP_FILE" 2>/dev/null
+  $COMPOSE exec -T n8n rm -f /home/node/.n8n/_cloud_backup.json 2>/dev/null || true
+fi
 
 # Upload to cloud storage via pre-signed URL
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT -T "$BACKUP_FILE" "$PRESIGNED_URL")
