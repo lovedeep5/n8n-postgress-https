@@ -22,6 +22,7 @@ services:
       - N8N_EDITOR_BASE_URL=https://${SUB_DOMAIN}.${DOMAIN}/
 
       - TZ=${TZ}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
 
       # Execution data retention (2 weeks)
       - EXECUTIONS_DATA_PRUNE=true
