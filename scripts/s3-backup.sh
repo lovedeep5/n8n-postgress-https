@@ -10,7 +10,7 @@ if [ -z "$PRESIGNED_URL" ]; then
 fi
 
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
-COMPOSE="docker compose -f /opt/n8n/simple_docker-compose.yml"
+COMPOSE="docker compose -f /opt/n8n/docker-compose.yml"
 CONTAINER=$($COMPOSE ps -q n8n 2>/dev/null)
 VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
 BACKUP_FILE="/tmp/n8n_cloud_backup_${TIMESTAMP}.json"
