@@ -38,6 +38,12 @@ VOLUME_DATA="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
 echo "$VERSION" > "$VOLUME_DATA/.backup_n8n_version" 2>/dev/null || true
 echo "$ENCRYPTION_KEY" > "$VOLUME_DATA/.backup_encryption_key" 2>/dev/null || true
 
+# Reclaim SQLite pages freed by execution pruning (runs while n8n is stopped, zero extra downtime)
+if command -v sqlite3 >/dev/null 2>&1 && [ -f "$VOLUME_DATA/database.sqlite" ]; then
+  echo "Compacting SQLite database..."
+  sqlite3 "$VOLUME_DATA/database.sqlite" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;" 2>&1 || echo "VACUUM warning (continuing with backup)"
+fi
+
 echo "Creating volume snapshot..."
 docker run --rm \
   -v "${VOLUME_NAME}:/source:ro" \
