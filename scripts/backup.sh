@@ -30,6 +30,11 @@ VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/nul
 mkdir -p "$COMPOSE_DIR/backups"
 echo "$VERSION" > "$COMPOSE_DIR/backups/last_update_version.txt"
 
+# Tag the current image with its version so rollback can use it without re-pulling
+if [ -n "$VERSION" ] && [ "$VERSION" != "unknown" ]; then
+  docker tag docker.n8n.io/n8nio/n8n:latest docker.n8n.io/n8nio/n8n:${VERSION} 2>/dev/null || true
+fi
+
 echo "Stopping n8n for backup..."
 docker compose -f "$COMPOSE_FILE" stop n8n 2>&1
 
