@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rollback n8n from full R2 backup
 # Usage: rollback.sh <presigned-get-url>
-# Output on success: ROLLBACK_OK|<version>
+# Output on success: ROLLBACK_OK|<timestamp>
 
 set -e
 
@@ -52,22 +52,17 @@ if [ -n "$BACKUP_ENCRYPTION_KEY" ]; then
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}|" "$ENV_FILE"
 fi
 
-# Read the n8n version that was running when backup was taken
+# Pin compose to the version tagged at backup time (image is already local — no pull needed)
 BACKUP_VERSION=$(cat "$VOLUME_DATA/.backup_n8n_version" 2>/dev/null | tr -d '[:space:]' || echo "")
-
 if [ -n "$BACKUP_VERSION" ] && [ "$BACKUP_VERSION" != "unknown" ]; then
-  echo "Pinning n8n to v${BACKUP_VERSION}..."
+  echo "Pinning n8n to v${BACKUP_VERSION} (using locally-tagged image)..."
   sed -i "s|image:.*n8nio/n8n.*|image: docker.n8n.io/n8nio/n8n:${BACKUP_VERSION}|" "$COMPOSE_FILE"
-  docker compose -f "$COMPOSE_FILE" pull n8n 2>&1
 fi
 
 echo "Starting n8n..."
-docker compose -f "$COMPOSE_FILE" up -d n8n 2>&1
-
-sleep 8
-VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/null || echo "unknown")
+docker compose -f "$COMPOSE_FILE" start n8n 2>&1
 
 # Reset compose file back to latest for future updates
 sed -i "s|image:.*n8nio/n8n:.*|image: docker.n8n.io/n8nio/n8n:latest|" "$COMPOSE_FILE"
 
-echo "ROLLBACK_OK|${VERSION}"
+echo "ROLLBACK_OK|$(date +%Y-%m-%d_%H-%M-%S)"
