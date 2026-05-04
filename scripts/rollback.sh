@@ -60,7 +60,7 @@ if [ -n "$BACKUP_VERSION" ] && [ "$BACKUP_VERSION" != "unknown" ]; then
 fi
 
 echo "Starting n8n..."
-docker compose -f "$COMPOSE_FILE" start n8n 2>&1
+docker compose -f "$COMPOSE_FILE" up -d n8n 2>&1
 
 # Reset compose file back to latest for future updates
 sed -i "s|image:.*n8nio/n8n:.*|image: docker.n8n.io/n8nio/n8n:latest|" "$COMPOSE_FILE"
