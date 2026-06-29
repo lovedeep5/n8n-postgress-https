@@ -1,0 +1,105 @@
+#!/bin/bash
+# Pre-update full volume backup to R2 via pre-signed URL
+# Usage: backup.sh <presigned-put-url>
+# Output on success: BACKUP_FULL_OK|<timestamp>|<encryption_key>|<size>
+
+set -e
+
+PRESIGNED_URL="$1"
+if [ -z "$PRESIGNED_URL" ]; then
+  echo "BACKUP_ERROR|missing presigned URL argument"
+  exit 1
+fi
+
+COMPOSE_DIR="/opt/n8n"
+ENV_FILE="$COMPOSE_DIR/.env"
+TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
+BACKUP_FILE="/tmp/n8n_update_backup_${TIMESTAMP}.tar.gz"
+
+# Detect mode
+QUEUE_MODE=$(grep '^QUEUE_MODE=' "$ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+
+if [ "$QUEUE_MODE" = "true" ]; then
+  COMPOSE_FILE="$COMPOSE_DIR/docker-compose.queue.yml"
+  VOLUME_NAME="n8n_postgres_data"
+else
+  COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
+  VOLUME_NAME="n8n_n8n_data"
+fi
+
+# Read encryption key
+ENCRYPTION_KEY=$(grep '^ENCRYPTION_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
+if [ -z "$ENCRYPTION_KEY" ]; then
+  echo "BACKUP_ERROR|could not read ENCRYPTION_KEY from $ENV_FILE"
+  exit 1
+fi
+
+# Get current version BEFORE stopping
+VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/null || echo "unknown")
+mkdir -p "$COMPOSE_DIR/backups"
+echo "$VERSION" > "$COMPOSE_DIR/backups/last_update_version.txt"
+
+# Tag the current n8n image with its version for rollback
+if [ -n "$VERSION" ] && [ "$VERSION" != "unknown" ]; then
+  docker tag docker.n8n.io/n8nio/n8n:latest docker.n8n.io/n8nio/n8n:${VERSION} 2>/dev/null || true
+fi
+
+echo "Stopping n8n for backup..."
+docker compose -f "$COMPOSE_FILE" stop n8n 2>&1
+
+if [ "$QUEUE_MODE" = "true" ]; then
+  # --- Queue mode backup: pg_dump + redis save ---
+  echo "Queue mode: dumping PostgreSQL..."
+  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_dump -U n8n -d n8n 2>/dev/null | gzip > /tmp/n8n_pg_dump.sql.gz
+
+  echo "Queue mode: saving Redis..."
+  docker compose -f "$COMPOSE_FILE" exec -T redis redis-cli -a "$(grep '^REDIS_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)" SAVE 2>/dev/null || true
+
+  echo "Queue mode: creating backup archive..."
+  mkdir -p /tmp/n8n_backup_data
+  cp /tmp/n8n_pg_dump.sql.gz /tmp/n8n_backup_data/
+  # Include n8n config/data too (credentials, settings, etc.)
+  VOLUME_DATA="/var/lib/docker/volumes/n8n_n8n_data/_data"
+  cp "$VOLUME_DATA/.backup_n8n_version" /tmp/n8n_backup_data/ 2>/dev/null || true
+  echo "$ENCRYPTION_KEY" > /tmp/n8n_backup_data/.backup_encryption_key
+
+  tar czf "$BACKUP_FILE" -C /tmp n8n_backup_data
+  rm -rf /tmp/n8n_backup_data /tmp/n8n_pg_dump.sql.gz
+else
+  # --- Regular mode backup: SQLite VACUUM + tar (existing logic) ---
+  VOLUME_DATA="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
+  echo "$VERSION" > "$VOLUME_DATA/.backup_n8n_version" 2>/dev/null || true
+  echo "$ENCRYPTION_KEY" > "$VOLUME_DATA/.backup_encryption_key" 2>/dev/null || true
+
+  if command -v sqlite3 >/dev/null 2>&1 && [ -f "$VOLUME_DATA/database.sqlite" ]; then
+    echo "Compacting SQLite database..."
+    sqlite3 "$VOLUME_DATA/database.sqlite" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;" 2>&1 || echo "VACUUM warning (continuing)"
+  fi
+
+  echo "Creating volume snapshot..."
+  docker run --rm \
+    -v "${VOLUME_NAME}:/source:ro" \
+    -v "/tmp:/backup" \
+    alpine tar czf "/backup/$(basename "$BACKUP_FILE")" -C /source .
+fi
+
+echo "Starting n8n..."
+docker compose -f "$COMPOSE_FILE" start n8n 2>&1
+
+FILESIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
+echo "Backup size: $FILESIZE"
+
+echo "Uploading to R2..."
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+  -H "Content-Type: application/gzip" \
+  -T "$BACKUP_FILE" \
+  "$PRESIGNED_URL")
+
+rm -f "$BACKUP_FILE"
+
+if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+  echo "BACKUP_FULL_OK|${TIMESTAMP}|${ENCRYPTION_KEY}|${FILESIZE}"
+else
+  echo "BACKUP_ERROR|upload failed with HTTP $HTTP_CODE"
+  exit 1
+fi
