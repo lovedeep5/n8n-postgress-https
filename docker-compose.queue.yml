@@ -102,7 +102,6 @@ services:
       - n8n
 
   n8n-worker:
-    profile: worker
     image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
     pull_policy: always
     restart: unless-stopped
