@@ -30,7 +30,6 @@ services:
 
       # Noise reduction
       - N8N_DIAGNOSTICS_ENABLED=false
-      - N8N_PERSONALIZATION_ENABLED=false
       - N8N_LOG_LEVEL=info
 
     volumes:
