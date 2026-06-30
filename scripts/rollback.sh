@@ -77,10 +77,6 @@ BACKUP_ENCRYPTION_KEY=$(cat "$VOLUME_PATH/.backup_encryption_key" 2>/dev/null | 
 if [ -n "$BACKUP_ENCRYPTION_KEY" ]; then
   echo "Restoring ENCRYPTION_KEY from backup..."
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}|" "$ENV_FILE"
-  # Queue mode compose references N8N_ENCRYPTION_KEY — keep both in sync
-  if grep -q '^N8N_ENCRYPTION_KEY=' "$ENV_FILE" 2>/dev/null; then
-    sed -i "s|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}|" "$ENV_FILE"
-  fi
 fi
 
 # Read the n8n version that was running when backup was taken
