@@ -12,11 +12,20 @@ if [ -z "$PRESIGNED_URL" ]; then
 fi
 
 COMPOSE_DIR="/opt/n8n"
-COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
-ENV_FILE="$COMPOSE_DIR/.env"
+if [ -f /opt/n8n/.queue_mode ]; then
+  COMPOSE_FILE="$COMPOSE_DIR/n8n-queue/docker-compose.yml"
+  ENV_FILE="$COMPOSE_DIR/n8n-queue/.env"
+  N8N_SERVICES="n8n n8n-worker"
+else
+  COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
+  ENV_FILE="$COMPOSE_DIR/.env"
+  N8N_SERVICES="n8n"
+fi
+
 TIMESTAMP=$(date +%Y-%m-%d_%H-%M-%S)
 BACKUP_FILE="/tmp/n8n_update_backup_${TIMESTAMP}.tar.gz"
 VOLUME_NAME="n8n_n8n_data"
+VOLUME_PATH="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
 
 # Read encryption key
 ENCRYPTION_KEY=$(grep '^ENCRYPTION_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
@@ -30,23 +39,25 @@ VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/nul
 mkdir -p "$COMPOSE_DIR/backups"
 echo "$VERSION" > "$COMPOSE_DIR/backups/last_update_version.txt"
 
-# Tag the current image with its version so rollback can use it without re-pulling
-if [ -n "$VERSION" ] && [ "$VERSION" != "unknown" ]; then
-  docker tag docker.n8n.io/n8nio/n8n:latest docker.n8n.io/n8nio/n8n:${VERSION} 2>/dev/null || true
-fi
-
 echo "Stopping n8n for backup..."
-docker compose -f "$COMPOSE_FILE" stop n8n 2>&1
+docker compose -f "$COMPOSE_FILE" stop $N8N_SERVICES 2>&1
 
 # Embed version + encryption key into volume so rollback can restore both correctly
-VOLUME_DATA="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
-echo "$VERSION" > "$VOLUME_DATA/.backup_n8n_version" 2>/dev/null || true
-echo "$ENCRYPTION_KEY" > "$VOLUME_DATA/.backup_encryption_key" 2>/dev/null || true
+echo "$VERSION" > "$VOLUME_PATH/.backup_n8n_version" 2>/dev/null || true
+echo "$ENCRYPTION_KEY" > "$VOLUME_PATH/.backup_encryption_key" 2>/dev/null || true
 
-# Reclaim SQLite pages freed by execution pruning (runs while n8n is stopped, zero extra downtime)
-if command -v sqlite3 >/dev/null 2>&1 && [ -f "$VOLUME_DATA/database.sqlite" ]; then
+# Queue mode: dump PostgreSQL database into the volume before tarring
+if [ -f /opt/n8n/.queue_mode ]; then
+  echo "Dumping PostgreSQL database..."
+  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_dump -U n8n -d n8n > "$VOLUME_PATH/.queue_pg_dump.sql" 2>/dev/null || echo "WARNING: pg_dump failed" >&2
+fi
+
+# Reclaim SQLite pages (only for regular mode — queue mode uses PostgreSQL)
+if [ -f /opt/n8n/.queue_mode ]; then
+  echo "Skipping SQLite VACUUM (queue mode — PostgreSQL)"
+elif command -v sqlite3 >/dev/null 2>&1 && [ -f "$VOLUME_PATH/database.sqlite" ]; then
   echo "Compacting SQLite database..."
-  sqlite3 "$VOLUME_DATA/database.sqlite" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;" 2>&1 || echo "VACUUM warning (continuing with backup)"
+  sqlite3 "$VOLUME_PATH/database.sqlite" "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;" 2>&1 || echo "VACUUM warning (continuing with backup)"
 fi
 
 echo "Creating volume snapshot..."
@@ -56,7 +67,7 @@ docker run --rm \
   alpine tar czf "/backup/$(basename "$BACKUP_FILE")" -C /source .
 
 echo "Starting n8n..."
-docker compose -f "$COMPOSE_FILE" start n8n 2>&1
+docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES 2>&1
 
 FILESIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
 echo "Backup size: $FILESIZE"

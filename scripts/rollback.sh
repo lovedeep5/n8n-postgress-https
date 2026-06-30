@@ -1,7 +1,7 @@
 #!/bin/bash
 # Rollback n8n from full R2 backup
 # Usage: rollback.sh <presigned-get-url>
-# Output on success: ROLLBACK_OK|<timestamp>
+# Output on success: ROLLBACK_OK|<version>
 
 set -e
 
@@ -13,10 +13,19 @@ if [ -z "$PRESIGNED_URL" ]; then
 fi
 
 COMPOSE_DIR="/opt/n8n"
-COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
-ENV_FILE="$COMPOSE_DIR/.env"
+if [ -f /opt/n8n/.queue_mode ]; then
+  COMPOSE_FILE="$COMPOSE_DIR/n8n-queue/docker-compose.yml"
+  ENV_FILE="$COMPOSE_DIR/n8n-queue/.env"
+  N8N_SERVICES="n8n n8n-worker"
+else
+  COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
+  ENV_FILE="$COMPOSE_DIR/.env"
+  N8N_SERVICES="n8n"
+fi
+
 RESTORE_FILE="/tmp/n8n_rollback_$(date +%s).tar.gz"
 VOLUME_NAME="n8n_n8n_data"
+VOLUME_PATH="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
 
 echo "Downloading backup from R2..."
 HTTP_CODE=$(curl -s -o "$RESTORE_FILE" -w "%{http_code}" "$PRESIGNED_URL")
@@ -30,7 +39,18 @@ FILESIZE=$(du -sh "$RESTORE_FILE" | cut -f1)
 echo "Downloaded: $FILESIZE"
 
 echo "Stopping n8n..."
-docker compose -f "$COMPOSE_FILE" stop n8n 2>&1
+docker compose -f "$COMPOSE_FILE" stop $N8N_SERVICES 2>&1
+
+# Queue mode: ensure postgres+redis are running for pg restore
+if [ -f /opt/n8n/.queue_mode ]; then
+  echo "Ensuring PostgreSQL and Redis are running..."
+  docker compose -f "$COMPOSE_FILE" up -d postgres redis 2>&1
+  echo "Waiting for PostgreSQL..."
+  for i in $(seq 1 30); do
+    docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U n8n -d n8n 2>/dev/null && break
+    sleep 2
+  done
+fi
 
 echo "Clearing existing volume..."
 docker run --rm -v "${VOLUME_NAME}:/data" alpine sh -c "rm -rf /data/* /data/.[!.]*" 2>&1
@@ -43,26 +63,51 @@ docker run --rm \
 
 rm -f "$RESTORE_FILE"
 
-VOLUME_DATA="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
+# Queue mode: restore PostgreSQL database from the pg_dump embedded in the volume
+if [ -f /opt/n8n/.queue_mode ] && [ -f "$VOLUME_PATH/.queue_pg_dump.sql" ]; then
+  echo "Restoring PostgreSQL database..."
+  docker compose -f "$COMPOSE_FILE" exec -T postgres psql -U n8n -d n8n < "$VOLUME_PATH/.queue_pg_dump.sql" 2>/dev/null || echo "WARNING: psql restore had issues" >&2
+  rm -f "$VOLUME_PATH/.queue_pg_dump.sql"
+  echo "Running database migrations..."
+  docker compose -f "$COMPOSE_FILE" run --rm n8n n8n db:migrate 2>&1 || echo "Migration done"
+fi
 
 # Restore encryption key from backup
-BACKUP_ENCRYPTION_KEY=$(cat "$VOLUME_DATA/.backup_encryption_key" 2>/dev/null | tr -d '[:space:]' || echo "")
+BACKUP_ENCRYPTION_KEY=$(cat "$VOLUME_PATH/.backup_encryption_key" 2>/dev/null | tr -d '[:space:]' || echo "")
 if [ -n "$BACKUP_ENCRYPTION_KEY" ]; then
   echo "Restoring ENCRYPTION_KEY from backup..."
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}|" "$ENV_FILE"
+  # Queue mode compose references N8N_ENCRYPTION_KEY — keep both in sync
+  if grep -q '^N8N_ENCRYPTION_KEY=' "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY}|" "$ENV_FILE"
+  fi
 fi
 
-# Pin compose to the version tagged at backup time (image is already local — no pull needed)
-BACKUP_VERSION=$(cat "$VOLUME_DATA/.backup_n8n_version" 2>/dev/null | tr -d '[:space:]' || echo "")
+# Read the n8n version that was running when backup was taken
+BACKUP_VERSION=$(cat "$VOLUME_PATH/.backup_n8n_version" 2>/dev/null | tr -d '[:space:]' || echo "")
+
 if [ -n "$BACKUP_VERSION" ] && [ "$BACKUP_VERSION" != "unknown" ]; then
-  echo "Pinning n8n to v${BACKUP_VERSION} (using locally-tagged image)..."
+  echo "Pinning n8n to v${BACKUP_VERSION}..."
   sed -i "s|image:.*n8nio/n8n.*|image: docker.n8n.io/n8nio/n8n:${BACKUP_VERSION}|" "$COMPOSE_FILE"
+  docker compose -f "$COMPOSE_FILE" pull n8n 2>&1
 fi
 
 echo "Starting n8n..."
-docker compose -f "$COMPOSE_FILE" up -d n8n 2>&1
+docker compose -f "$COMPOSE_FILE" up -d $N8N_SERVICES 2>&1
+
+waited=0
+VERSION=""
+while [ $waited -lt 90 ]; do
+  VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/null || echo "")
+  if [ -n "$VERSION" ]; then
+    break
+  fi
+  sleep 3
+  waited=$((waited + 3))
+done
+[ -z "$VERSION" ] && VERSION="unknown"
 
 # Reset compose file back to latest for future updates
 sed -i "s|image:.*n8nio/n8n:.*|image: docker.n8n.io/n8nio/n8n:latest|" "$COMPOSE_FILE"
 
-echo "ROLLBACK_OK|$(date +%Y-%m-%d_%H-%M-%S)"
+echo "ROLLBACK_OK|${VERSION}"

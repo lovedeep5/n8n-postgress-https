@@ -6,7 +6,13 @@
 set -e
 
 COMPOSE_DIR="/opt/n8n"
-COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
+if [ -f /opt/n8n/.queue_mode ]; then
+  COMPOSE_FILE="$COMPOSE_DIR/n8n-queue/docker-compose.yml"
+  N8N_SERVICES="n8n n8n-worker"
+else
+  COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yml"
+  N8N_SERVICES="n8n"
+fi
 
 echo "Pulling latest n8n image..."
 for attempt in 1 2 3; do
@@ -23,19 +29,30 @@ for attempt in 1 2 3; do
 done
 
 echo "Restarting n8n..."
-docker compose -f "$COMPOSE_FILE" up -d n8n 2>&1
+docker compose -f "$COMPOSE_FILE" up -d $N8N_SERVICES 2>&1
 
-sleep 8
-VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/null || echo "unknown")
+# Queue mode: run database migrations after update
+if [ -f /opt/n8n/.queue_mode ]; then
+  echo "Running n8n database migrations..."
+  docker compose -f "$COMPOSE_FILE" run --rm n8n n8n db:migrate 2>&1 || echo "Migration done"
+fi
 
-# Clean up old n8n image versions — keeps :latest and the most recent tagged version (for rollback).
-# The most recent tagged version is the one backup.sh tagged before this update.
-PREV_VERSION=$(cat "$COMPOSE_DIR/backups/last_update_version.txt" 2>/dev/null | tr -d '[:space:]' || echo "")
-docker images docker.n8n.io/n8nio/n8n --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v ':latest$' | while read -r ref; do
-  TAG="${ref##*:}"
-  if [ "$TAG" != "$PREV_VERSION" ]; then
-    docker rmi "$ref" 2>/dev/null || true
+waited=0
+VERSION=""
+while [ $waited -lt 90 ]; do
+  VERSION=$(docker compose -f "$COMPOSE_FILE" exec -T n8n n8n --version 2>/dev/null || echo "")
+  if [ -n "$VERSION" ]; then
+    break
   fi
+  sleep 3
+  waited=$((waited + 3))
+done
+[ -z "$VERSION" ] && VERSION="unknown"
+
+# Clean up old n8n image versions — keeps :latest (just pulled), removes older tagged versions
+# Preserves alpine, caddy, and anything outside the n8nio/n8n repo.
+docker images docker.n8n.io/n8nio/n8n --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v ':latest$' | while read -r ref; do
+  docker rmi "$ref" 2>/dev/null || true
 done
 docker image prune -f 2>/dev/null || true
 
