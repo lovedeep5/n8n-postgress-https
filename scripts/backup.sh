@@ -49,7 +49,13 @@ echo "$ENCRYPTION_KEY" > "$VOLUME_PATH/.backup_encryption_key" 2>/dev/null || tr
 # Queue mode: dump PostgreSQL database into the volume before tarring
 if [ -f /opt/n8n/.queue_mode ]; then
   echo "Dumping PostgreSQL database..."
-  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_dump -U n8n -d n8n > "$VOLUME_PATH/.queue_pg_dump.sql" 2>/dev/null || echo "WARNING: pg_dump failed" >&2
+  if ! docker compose -f "$COMPOSE_FILE" exec -T postgres pg_dump -U n8n -d n8n > "$VOLUME_PATH/.queue_pg_dump.sql" 2>/dev/null || ! grep -q "PostgreSQL database dump complete" "$VOLUME_PATH/.queue_pg_dump.sql"; then
+    rm -f "$VOLUME_PATH/.queue_pg_dump.sql"
+    echo "Starting n8n..."
+    docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES 2>&1
+    echo "BACKUP_ERROR|pg_dump failed or produced a truncated dump"
+    exit 1
+  fi
 fi
 
 # Reclaim SQLite pages (only for regular mode — queue mode uses PostgreSQL)

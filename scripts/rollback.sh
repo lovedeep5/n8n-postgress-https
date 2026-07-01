@@ -64,12 +64,21 @@ docker run --rm \
 rm -f "$RESTORE_FILE"
 
 # Queue mode: restore PostgreSQL database from the pg_dump embedded in the volume
+# The n8n/n8n-worker containers are stopped, but postgres keeps running and its own
+# volume is never wiped, so the target DB still has all post-backup mutations. Drop
+# and recreate it for a clean slate before replaying the dump, otherwise the plain
+# (non --clean) pg_dump conflicts with existing rows and psql's errors go unseen.
 if [ -f /opt/n8n/.queue_mode ] && [ -f "$VOLUME_PATH/.queue_pg_dump.sql" ]; then
+  if ! grep -q "PostgreSQL database dump complete" "$VOLUME_PATH/.queue_pg_dump.sql"; then
+    echo "ROLLBACK_ERROR|backed-up pg_dump is missing or truncated, refusing to drop live database"
+    exit 1
+  fi
   echo "Restoring PostgreSQL database..."
-  docker compose -f "$COMPOSE_FILE" exec -T postgres psql -U n8n -d n8n < "$VOLUME_PATH/.queue_pg_dump.sql" 2>/dev/null || echo "WARNING: psql restore had issues" >&2
+  docker compose -f "$COMPOSE_FILE" exec -T postgres psql -U n8n -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'n8n' AND pid <> pg_backend_pid();" 2>&1
+  docker compose -f "$COMPOSE_FILE" exec -T postgres psql -U n8n -d postgres -c "DROP DATABASE IF EXISTS n8n;" 2>&1
+  docker compose -f "$COMPOSE_FILE" exec -T postgres psql -U n8n -d postgres -c "CREATE DATABASE n8n OWNER n8n;" 2>&1
+  docker compose -f "$COMPOSE_FILE" exec -T postgres psql -U n8n -d n8n -v ON_ERROR_STOP=1 < "$VOLUME_PATH/.queue_pg_dump.sql"
   rm -f "$VOLUME_PATH/.queue_pg_dump.sql"
-  echo "Running database migrations..."
-  docker compose -f "$COMPOSE_FILE" run --rm n8n n8n db:migrate 2>&1 || echo "Migration done"
 fi
 
 # Restore encryption key from backup
