@@ -6,6 +6,32 @@
 
 set -e
 
+# Safety net: if this script is killed/interrupted (deploy, crashed worker,
+# dropped SSH session, etc.) after n8n was stopped but before it was started
+# back up, restart it on exit instead of leaving the customer's instance down
+# until someone notices. No-op if n8n was never stopped, or already restarted.
+N8N_DOWN=0
+TRAP_LOG="/opt/n8n/backups/backup_trap.log"
+restore_n8n_on_exit() {
+  # A dropped SSH session (the exact case this exists for) leaves stdout/stderr
+  # as a broken pipe. Under `set -e`, writing to it would abort this handler
+  # before it ever reaches `docker compose start` - so disable -e here and log
+  # to a local file instead of the (possibly-dead) SSH stdout/stderr.
+  set +e
+  if [ "$N8N_DOWN" = "1" ]; then
+    mkdir -p "$(dirname "$TRAP_LOG")" >/dev/null 2>&1
+    echo "$(date -u +%FT%TZ) Script exiting while n8n was stopped - restarting as a safety net..." >> "$TRAP_LOG" 2>/dev/null
+    docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES >> "$TRAP_LOG" 2>&1
+    N8N_DOWN=0
+  fi
+}
+# EXIT alone does not fire on an untrapped signal - bash applies the kernel's
+# default disposition (immediate termination) and never reaches the trap. HUP
+# in particular is exactly what a dropped SSH session delivers, so it must be
+# trapped explicitly, not just EXIT.
+trap restore_n8n_on_exit EXIT
+trap 'restore_n8n_on_exit; exit 1' HUP TERM INT
+
 R2_BUCKET="$2"
 R2_KEY="$3"
 if [ -z "$R2_BUCKET" ] || [ -z "$R2_KEY" ]; then
@@ -70,6 +96,7 @@ mkdir -p "$COMPOSE_DIR/backups"
 echo "$VERSION" > "$COMPOSE_DIR/backups/last_update_version.txt"
 
 echo "Stopping n8n for backup..."
+N8N_DOWN=1
 docker compose -f "$COMPOSE_FILE" stop $N8N_SERVICES 2>&1
 
 # Embed version + encryption key into volume so rollback can restore both correctly
@@ -83,6 +110,7 @@ if [ -f /opt/n8n/.queue_mode ]; then
     rm -f "$VOLUME_PATH/.queue_pg_dump.sql"
     echo "Starting n8n..."
     docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES 2>&1
+    N8N_DOWN=0
     echo "BACKUP_ERROR|pg_dump failed or produced a truncated dump"
     exit 1
   fi
@@ -104,6 +132,7 @@ docker run --rm \
 
 echo "Starting n8n..."
 docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES 2>&1
+N8N_DOWN=0
 
 FILESIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
 echo "Backup size: $FILESIZE"
