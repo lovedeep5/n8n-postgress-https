@@ -17,8 +17,28 @@ if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || [ -z "$R2_E
   exit 1
 fi
 if ! command -v s5cmd >/dev/null 2>&1; then
-  echo "BACKUP_ERROR|s5cmd not installed"
-  exit 1
+  echo "s5cmd not found, installing..."
+  S5CMD_VERSION="2.3.0"
+  S5CMD_DEB="s5cmd_${S5CMD_VERSION}_linux_amd64.deb"
+  S5CMD_SHA256="81d02a17a13797dc5949adb99734ad4217d005638a7827f36d435945527b2e69"
+  TMP_DEB="/tmp/${S5CMD_DEB}"
+  if ! curl -sL -o "$TMP_DEB" \
+      "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/${S5CMD_DEB}"; then
+    echo "BACKUP_ERROR|failed to download s5cmd"
+    exit 1
+  fi
+  if ! echo "${S5CMD_SHA256}  ${TMP_DEB}" | sha256sum -c - >/dev/null 2>&1; then
+    rm -f "$TMP_DEB"
+    echo "BACKUP_ERROR|s5cmd checksum verification failed"
+    exit 1
+  fi
+  if ! dpkg -i "$TMP_DEB" >/dev/null 2>&1; then
+    rm -f "$TMP_DEB"
+    echo "BACKUP_ERROR|s5cmd install failed"
+    exit 1
+  fi
+  rm -f "$TMP_DEB"
+  echo "s5cmd installed"
 fi
 
 COMPOSE_DIR="/opt/n8n"
