@@ -24,9 +24,9 @@ services:
       - TZ=${TZ}
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
 
-      # Execution data retention (2 weeks)
+      # Execution data retention (15 days)
       - EXECUTIONS_DATA_PRUNE=true
-      - EXECUTIONS_DATA_MAX_AGE=336
+      - EXECUTIONS_DATA_MAX_AGE=360
 
       # Noise reduction
       - N8N_DIAGNOSTICS_ENABLED=false
@@ -34,6 +34,11 @@ services:
 
     volumes:
       - n8n_data:/home/node/.n8n
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   caddy:
     image: caddy:latest
@@ -47,3 +52,8 @@ services:
       - caddy_data:/data
     depends_on:
       - n8n
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
