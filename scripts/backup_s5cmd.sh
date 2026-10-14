@@ -10,7 +10,12 @@ set -e
 # dropped SSH session, etc.) after n8n was stopped but before it was started
 # back up, restart it on exit instead of leaving the customer's instance down
 # until someone notices. No-op if n8n was never stopped, or already restarted.
+# Also removes the backup tarball on any exit path - the happy-path rm further
+# down already does this, but an abnormal termination (the exact case this
+# trap exists for) skips straight past it, orphaning a multi-GB file in /tmp
+# that eventually fills the disk and takes n8n down with a SQLITE_IOERR.
 N8N_DOWN=0
+BACKUP_FILE=""
 TRAP_LOG="/opt/n8n/backups/backup_trap.log"
 restore_n8n_on_exit() {
   # A dropped SSH session (the exact case this exists for) leaves stdout/stderr
@@ -18,6 +23,7 @@ restore_n8n_on_exit() {
   # before it ever reaches `docker compose start` - so disable -e here and log
   # to a local file instead of the (possibly-dead) SSH stdout/stderr.
   set +e
+  [ -n "$BACKUP_FILE" ] && rm -f "$BACKUP_FILE" 2>/dev/null
   if [ "$N8N_DOWN" = "1" ]; then
     mkdir -p "$(dirname "$TRAP_LOG")" >/dev/null 2>&1
     echo "$(date -u +%FT%TZ) Script exiting while n8n was stopped - restarting as a safety net..." >> "$TRAP_LOG" 2>/dev/null

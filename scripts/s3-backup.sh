@@ -15,6 +15,19 @@ CONTAINER=$($COMPOSE ps -q n8n 2>/dev/null)
 VERSION=$($COMPOSE exec -T n8n n8n --version 2>/dev/null || echo unknown)
 BACKUP_FILE="/tmp/n8n_cloud_backup_${TIMESTAMP}.json"
 
+# Safety net: an abnormal exit (dropped SSH session, timeout, etc.) would
+# otherwise skip the rm further down and orphan this file in /tmp. n8n is
+# never stopped in this script, so no restart safety net is needed - just
+# cleanup. EXIT alone does not fire on an untrapped signal (bash applies the
+# kernel's default disposition and terminates immediately), so HUP/TERM/INT
+# must be trapped explicitly too.
+cleanup_on_exit() {
+  set +e
+  [ -n "$BACKUP_FILE" ] && rm -f "$BACKUP_FILE" 2>/dev/null
+}
+trap cleanup_on_exit EXIT
+trap 'cleanup_on_exit; exit 1' HUP TERM INT
+
 # Export workflows — capture output to detect empty instances
 EXPORT_OUT=$($COMPOSE exec -T n8n n8n export:workflow --all --pretty \
   --output=/home/node/.n8n/_cloud_backup.json 2>&1 || true)
