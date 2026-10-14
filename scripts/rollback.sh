@@ -27,6 +27,27 @@ RESTORE_FILE="/tmp/n8n_rollback_$(date +%s).tar.gz"
 VOLUME_NAME="n8n_n8n_data"
 VOLUME_PATH="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
 
+# Safety net: if this script is killed/interrupted after n8n was stopped but
+# before it was started back up, restart it on exit instead of leaving the
+# customer's instance down until someone notices. Also removes the
+# downloaded restore tarball on any exit path, so an abnormal termination
+# doesn't orphan a multi-GB file in /tmp (the same bug class that filled a
+# droplet's disk and crashed n8n via SQLITE_IOERR - see backup.sh).
+N8N_DOWN=0
+TRAP_LOG="/opt/n8n/backups/backup_trap.log"
+cleanup_on_exit() {
+  set +e
+  [ -n "$RESTORE_FILE" ] && rm -f "$RESTORE_FILE" 2>/dev/null
+  if [ "$N8N_DOWN" = "1" ]; then
+    mkdir -p "$(dirname "$TRAP_LOG")" >/dev/null 2>&1
+    echo "$(date -u +%FT%TZ) Script exiting while n8n was stopped - restarting as a safety net..." >> "$TRAP_LOG" 2>/dev/null
+    docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES >> "$TRAP_LOG" 2>&1
+    N8N_DOWN=0
+  fi
+}
+trap cleanup_on_exit EXIT
+trap 'cleanup_on_exit; exit 1' HUP TERM INT
+
 echo "Downloading backup from R2..."
 HTTP_CODE=$(curl -s -o "$RESTORE_FILE" -w "%{http_code}" "$PRESIGNED_URL")
 if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
@@ -39,6 +60,7 @@ FILESIZE=$(du -sh "$RESTORE_FILE" | cut -f1)
 echo "Downloaded: $FILESIZE"
 
 echo "Stopping n8n..."
+N8N_DOWN=1
 docker compose -f "$COMPOSE_FILE" stop $N8N_SERVICES 2>&1
 
 # Queue mode: ensure postgres+redis are running for pg restore
@@ -99,6 +121,7 @@ fi
 
 echo "Starting n8n..."
 docker compose -f "$COMPOSE_FILE" up -d $N8N_SERVICES 2>&1
+N8N_DOWN=0
 
 waited=0
 VERSION=""

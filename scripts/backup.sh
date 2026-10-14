@@ -27,6 +27,32 @@ BACKUP_FILE="/tmp/n8n_update_backup_${TIMESTAMP}.tar.gz"
 VOLUME_NAME="n8n_n8n_data"
 VOLUME_PATH="/var/lib/docker/volumes/${VOLUME_NAME}/_data"
 
+# Safety net: if this script is killed/interrupted (deploy, crashed worker,
+# dropped SSH session, etc.) after n8n was stopped but before it was started
+# back up, restart it on exit instead of leaving the customer's instance down
+# until someone notices. Also removes the backup tarball on any exit path -
+# the happy-path rm further down already does this, but an abnormal
+# termination skips straight past it, orphaning a multi-GB file in /tmp that
+# eventually fills the disk and takes n8n down with a SQLITE_IOERR.
+N8N_DOWN=0
+TRAP_LOG="/opt/n8n/backups/backup_trap.log"
+cleanup_on_exit() {
+  # A dropped SSH session leaves stdout/stderr as a broken pipe. Under
+  # `set -e`, writing to it would abort this handler before it ever reaches
+  # `docker compose start` - so disable -e here and log to a local file
+  # instead of the (possibly-dead) SSH stdout/stderr.
+  set +e
+  [ -n "$BACKUP_FILE" ] && rm -f "$BACKUP_FILE" 2>/dev/null
+  if [ "$N8N_DOWN" = "1" ]; then
+    mkdir -p "$(dirname "$TRAP_LOG")" >/dev/null 2>&1
+    echo "$(date -u +%FT%TZ) Script exiting while n8n was stopped - restarting as a safety net..." >> "$TRAP_LOG" 2>/dev/null
+    docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES >> "$TRAP_LOG" 2>&1
+    N8N_DOWN=0
+  fi
+}
+trap cleanup_on_exit EXIT
+trap 'cleanup_on_exit; exit 1' HUP TERM INT
+
 # Read encryption key
 ENCRYPTION_KEY=$(grep '^ENCRYPTION_KEY=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
 if [ -z "$ENCRYPTION_KEY" ]; then
@@ -40,6 +66,7 @@ mkdir -p "$COMPOSE_DIR/backups"
 echo "$VERSION" > "$COMPOSE_DIR/backups/last_update_version.txt"
 
 echo "Stopping n8n for backup..."
+N8N_DOWN=1
 docker compose -f "$COMPOSE_FILE" stop $N8N_SERVICES 2>&1
 
 # Embed version + encryption key into volume so rollback can restore both correctly
@@ -53,6 +80,7 @@ if [ -f /opt/n8n/.queue_mode ]; then
     rm -f "$VOLUME_PATH/.queue_pg_dump.sql"
     echo "Starting n8n..."
     docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES 2>&1
+    N8N_DOWN=0
     echo "BACKUP_ERROR|pg_dump failed or produced a truncated dump"
     exit 1
   fi
@@ -74,6 +102,7 @@ docker run --rm \
 
 echo "Starting n8n..."
 docker compose -f "$COMPOSE_FILE" start $N8N_SERVICES 2>&1
+N8N_DOWN=0
 
 FILESIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
 echo "Backup size: $FILESIZE"
